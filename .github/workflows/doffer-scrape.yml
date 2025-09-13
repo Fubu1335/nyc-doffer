@@ -1,0 +1,59 @@
+name: Doffer scrape → CSV
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Tax year to scrape (e.g., 2024)'
+        required: true
+        default: '2024'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: System deps (pdftotext for PDFs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils wget
+
+      - name: Install Xpdf pdftotext 4.05 (the one doffer expects)
+        run: |
+          wget -q https://dl.xpdfreader.com/xpdf-tools-linux-4.05.tar.gz
+          tar xzf xpdf-tools-linux-4.05.tar.gz
+          echo "PDFTOTEXT=$PWD/xpdf-tools-linux-4.05/bin64/pdftotext" >> $GITHUB_ENV
+
+      - name: Install node deps & build
+        run: |
+          corepack enable
+          yarn
+          yarn build
+
+      - name: Environment for headless Chrome
+        run: |
+          echo "PUPPETEER_ARGS=--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage" >> $GITHUB_ENV
+
+      # Build the local SQLite DB ("boop"), seed BBLs, scrape the latest year, export CSV
+      - name: Run doffer (seed → scrape → export CSV)
+        env:
+          DOF_ONLY_YEARS: ${{ github.event.inputs.year }}
+        run: |
+          node dbtool.js createdb boop
+          node dbtool.js build_bbl_table boop hpd_registrations
+          node dbtool.js scrape boop
+          node dbtool.js output_csv boop > doffer_units.csv
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: doffer_units_${{ github.event.inputs.year }}
+          path: doffer_units.csv
