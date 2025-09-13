@@ -1,4 +1,4 @@
-name: Doffer scrape → CSV
+name: Doffer scrape (by borough) → CSV
 
 on:
   workflow_dispatch:
@@ -7,10 +7,26 @@ on:
         description: 'Tax year to scrape (e.g., 2024)'
         required: true
         default: '2024'
+      borough:
+        description: 'Borough to scrape'
+        required: true
+        type: choice
+        options:
+          - Manhattan
+          - Bronx
+          - Brooklyn
+          - Queens
+          - Staten Island
+        default: 'Queens'
+      max_rows:
+        description: 'Optional: limit to first N BBLs (e.g., 2000) for a quick test'
+        required: false
+        default: ''
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6h cap
 
     services:
       postgres:
@@ -27,7 +43,7 @@ jobs:
           --health-retries=10
 
     env:
-      # nyc-doffer needs these:
+      # nyc-doffer expects these:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/doffer
       NYCDB_URL: postgresql://postgres:postgres@localhost:5432/doffer
       PUPPETEER_ARGS: --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
@@ -51,7 +67,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y poppler-utils wget
 
-      - name: Install Xpdf pdftotext 4.05 (the one doffer expects)
+      - name: Install Xpdf pdftotext 4.05 (what doffer expects)
         run: |
           wget -q https://dl.xpdfreader.com/xpdf-tools-linux-4.05.tar.gz
           tar xzf xpdf-tools-linux-4.05.tar.gz
@@ -63,25 +79,64 @@ jobs:
           yarn
           yarn build
 
-      - name: Install NYCDB and load HPD registrations (for BBL list)
+      - name: Install NYCDB and load HPD registrations (BBL source)
         run: |
           python -m pip install --upgrade pip nycdb
-          # download + load the HPD registrations table into the same Postgres
           nycdb -U postgres -P postgres -H localhost -D doffer --download hpd_registrations
           nycdb -U postgres -P postgres -H localhost -D doffer --load hpd_registrations
           nycdb -U postgres -P postgres -H localhost -D doffer --verify hpd_registrations
 
-      - name: Build job table, scrape year, export CSV
+      - name: Build job table from NYCDB
         run: |
-          # 1) make a doffer job table named "boop" from NYCDB's HPD regs
           node dbtool.js build_bbl_table boop hpd_registrations
-          # 2) scrape (limit to the chosen year)
-          node dbtool.js scrape boop --only-year=${{ github.event.inputs.year }} --only-soa
-          # 3) export results
+          psql "$DATABASE_URL" -c "select count(*) as total_bbls from boop;"
+
+      - name: Filter to selected borough (and optional cap)
+        shell: bash
+        run: |
+          # Map borough name to BBL first digit
+          case "${{ github.event.inputs.borough }}" in
+            "Manhattan")   BD=1 ;;
+            "Bronx")       BD=2 ;;
+            "Brooklyn")    BD=3 ;;
+            "Queens")      BD=4 ;;
+            "Staten Island") BD=5 ;;
+          esac
+          echo "Selected borough: ${{ github.event.inputs.borough }} (code $BD)"
+
+          # Create filtered table with only that borough; optionally cap to N rows
+          if [ -n "${{ github.event.inputs.max_rows }}" ]; then
+            LIMIT="limit ${{ github.event.inputs.max_rows }}"
+          else
+            LIMIT=""
+          fi
+
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            drop table if exists boop_filtered;
+            create table boop_filtered as
+            select * from boop
+            where substring(bbl::text,1,1) = '$BD'
+            $LIMIT;
+            drop table boop;
+            alter table boop_filtered rename to boop;
+          "
+          psql "$DATABASE_URL" -c "select count(*) as kept_bbls from boop;"
+
+      - name: Scrape selected borough for chosen year
+        env:
+          DOF_ONLY_YEARS: ${{ github.event.inputs.year }}
+        run: |
+          # --only-soa focuses on Statements of Account (faster than including NOPV)
+          # You can bump concurrency modestly; too high risks rate limits/timeouts.
+          node dbtool.js scrape boop --only-year=${{ github.event.inputs.year }} --only-soa --concurrency=4
+
+      - name: Export CSV
+        run: |
           node dbtool.js output_csv boop > doffer_units.csv
+          wc -l doffer_units.csv || true
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: doffer_units_${{ github.event.inputs.year }}
+          name: doffer_${{ github.event.inputs.year }}_${{ github.event.inputs.borough }}${{ github.event.inputs.max_rows && format('_first{0}', github.event.inputs.max_rows) || '' }}
           path: doffer_units.csv
