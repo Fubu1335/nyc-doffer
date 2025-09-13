@@ -12,6 +12,26 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: doffer
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      # nyc-doffer needs these:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/doffer
+      NYCDB_URL: postgresql://postgres:postgres@localhost:5432/doffer
+      PUPPETEER_ARGS: --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,6 +40,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+
+      - name: Setup Python (for NYCDB CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: System deps (pdftotext for PDFs)
         run: |
@@ -38,18 +63,21 @@ jobs:
           yarn
           yarn build
 
-      - name: Environment for headless Chrome
+      - name: Install NYCDB and load HPD registrations (for BBL list)
         run: |
-          echo "PUPPETEER_ARGS=--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage" >> $GITHUB_ENV
+          python -m pip install --upgrade pip nycdb
+          # download + load the HPD registrations table into the same Postgres
+          nycdb -U postgres -P postgres -H localhost -D doffer --download hpd_registrations
+          nycdb -U postgres -P postgres -H localhost -D doffer --load hpd_registrations
+          nycdb -U postgres -P postgres -H localhost -D doffer --verify hpd_registrations
 
-      # Build the local SQLite DB ("boop"), seed BBLs, scrape the latest year, export CSV
-      - name: Run doffer (seed → scrape → export CSV)
-        env:
-          DOF_ONLY_YEARS: ${{ github.event.inputs.year }}
+      - name: Build job table, scrape year, export CSV
         run: |
-          node dbtool.js createdb boop
+          # 1) make a doffer job table named "boop" from NYCDB's HPD regs
           node dbtool.js build_bbl_table boop hpd_registrations
-          node dbtool.js scrape boop
+          # 2) scrape (limit to the chosen year)
+          node dbtool.js scrape boop --only-year=${{ github.event.inputs.year }} --only-soa
+          # 3) export results
           node dbtool.js output_csv boop > doffer_units.csv
 
       - name: Upload CSV artifact
