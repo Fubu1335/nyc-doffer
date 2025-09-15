@@ -115,14 +115,18 @@ jobs:
         run: |
           node dbtool.js scrape boop --only-year="$YEAR" --only-soa --concurrency=4
 
-      - name: Export CSV
+      - name: Export CSV (with unit counts)
         env:
           YEAR: ${{ github.event.inputs.year }}
         run: |
-          # For SOA-only scrape, use output_soa_csv; otherwise use output_csv
-          node dbtool.js output_soa_csv boop "$YEAR"
-          # dbtool writes to boop.csv by default; rename it to our standard name
+          # Use the full exporter (includes the `units` column).
+          # Note: dbtool writes to boop.csv by default; do NOT use ">" redirection.
+          node dbtool.js output_csv boop "$YEAR"
+
+          # Rename the generated file to a stable name for the artifact step.
           mv boop.csv doffer_units.csv
+
+          # Sanity check: the header should include "ucbbl,year,units,estimated"
           head -n 5 doffer_units.csv || true
           wc -l doffer_units.csv || true
 
