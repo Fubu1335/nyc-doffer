@@ -131,9 +131,9 @@ jobs:
           node dbtool.js scrape boop --only-year=${{ github.event.inputs.year }} --only-soa --concurrency=4
 
       - name: Export CSV
-        run: |
-          node dbtool.js output_csv boop > doffer_units.csv
-          wc -l doffer_units.csv || true
+  run: |
+    node dbtool.js output_soa_csv boop ${{ github.event.inputs.year }} > doffer_units.csv
+    wc -l doffer_units.csv || true
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
